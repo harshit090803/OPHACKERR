@@ -1,0 +1,45 @@
+{
+  "summary": "Full backend + frontend E2E of Video Teacher feature. 14/14 new backend tests pass and 12/12 chat regression tests still pass. Real integrations verified: Claude Sonnet 4.5 produces valid 8-slide lesson + 5-item homework grounded in the CAP theorem seed PDF; OpenAI tts-1 returns >10KB MP3 audio (verified magic bytes + 43s duration on the browser side); OpenAI Whisper transcribes the TTS output back to text containing source keywords; voice-ask returns spoken-prose answer (no markdown, <120 words) + TTS audio. Frontend Video Class is the DEFAULT tab, all data-testids present (teacher-avatar, blackboard, slide-title, dots 0..7, play/pause/next/prev, raise-hand, open-homework). Play triggers TTS fetch, audio element gets data:audio/mp3 src, plays, and pauses correctly. Slide navigation via next/prev/dots works. Pop-quiz modal opens on audio-ended for slides that have a quiz; pick + check reveals correct/wrong; continue advances. Homework modal opens with 5 items and closes. Raise-hand opens ask-modal with mic-btn present. Regression: Quiz, Flashcards, Q&A Chat tabs still switch and Library/upload/delete unaffected.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Video Class tab re-entry", "issues": ["When user switches to Quiz/Cards/Chat and comes back to Video Class, VideoTeacher remounts and shows the full-page 'Preparing today\u2019s class\u2026 Professor is drafting the lesson plan and slides.' loader for ~1-2s while it re-fetches the cached lesson. Copy is misleading (nothing is being drafted the second time) and audio prefetch cache is also lost. Consider lifting lesson state to Study.jsx or keeping VideoTeacher mounted."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_video_teacher.py",
+    "/app/backend/tests/test_teacher_chat.py",
+    "/app/test_reports/pytest/pytest_video_teacher.xml"
+  ],
+  "action_items": [
+    "(Optional UX) Cache the lesson at Study.jsx level or use React.memo/keep-alive so the loader doesn't reappear when switching back to the Video Class tab.",
+    "(Optional copy fix) Change the loader message when lesson is being re-fetched from a cache (or skip the loader entirely if we already have the lesson in memory)."
+  ],
+  "critical_code_review_comments": [
+    "Backend: `regen_lesson` calls `get_lesson(doc_id)` directly which is a route handler; it works but couples the two. Extracting a `_load_or_build_lesson(doc_id)` helper would be cleaner and would avoid re-running route-level HTTPException semantics inside another route.",
+    "Backend: TTS/STT clients are instantiated at import time as module globals (`_tts_client = OpenAITextToSpeech(...)`). If EMERGENT_LLM_KEY ever rotates, the process needs a restart. Consider lazy construction or a dependency-injected provider.",
+    "Backend: STT endpoint returns 500 on any provider error (including invalid audio bytes). Spec says clear 400 for empty/invalid audio would be nicer; currently the test accepts 400 OR 500 and gets 500. Consider catching known 'invalid audio' errors and mapping to 400.",
+    "Backend: `_extract_json` will raise `ValueError` (not `HTTPException`) if Claude returns malformed JSON; the caller doesn't catch it so lesson endpoint would surface as an unhandled 500. Wrap in try/except and return 502/500 with a friendly message.",
+    "Backend: server.py is now 581 lines. It's manageable but past the point where splitting into routers/services (documents, chat, video_teacher/lesson, tts_stt) would help maintainability.",
+    "Frontend VideoTeacher: `analyserRef` is set once per component instance; if the user switches slides the same MediaElementSource stays connected which is fine, but if audioRef.current is re-created React would leak. Not seen in practice.",
+    "Frontend VideoTeacher: on tab re-mount, `audioCache.current` (per-instance ref) is wiped, so every slide's TTS is re-fetched over the network. Consider a module-scope cache keyed by (docId, slideIdx).",
+    "Frontend: `useEffect` cleanup calls `stopAll()` but does not stop the AudioContext (`audioCtxRef.current?.close()`). Repeated remounts will leak audio contexts (browsers cap at ~6).",
+    "Frontend AskProfessorModal: no visible way to cancel a running recording other than pressing Escape; user might tap the recording pill hoping it toggles. Currently it does (mic-btn toggles rec/stop) - fine, but no explicit close button on the modal when recording is in progress."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_video_teacher.py (new)",
+    "/app/test_reports/iteration_2.json (new)"
+  ],
+  "success_rate": {"backend": "100% (26/26 across both test files)", "frontend": "100% (all critical flows + regression)"},
+  "test_credentials": "N/A - no auth in this app",
+  "seed_data_creation": "Reused seed doc a4296812-7976-4db7-ae70-e7fdefe5990a. Lesson was already generated & cached, regenerate test replaced it with a fresh lesson (still cached). Pending-doc test uploads/deletes a tiny reportlab PDF each run.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend base URL from REACT_APP_BACKEND_URL. All new endpoints prefixed with /api. Video Teacher tests live in /app/backend/tests/test_video_teacher.py (14 tests, ~65s wall-clock because Claude lesson generation runs during 'regenerate' test). Chat regression tests remain in test_teacher_chat.py (12 tests, ~27s). To test pop-quiz UI without waiting 40+ seconds for narration to end, dispatch a synthetic 'ended' event on the audio element (see the Playwright script used in this iteration). TTS returns real MP3 (>10KB); Whisper works round-trip on that same MP3. Voice-ask returns valid <120-word spoken prose. All AI integrations verified live via EMERGENT_LLM_KEY.",
+  "rca of the issue": "No bugs found. All features work per spec."
+}

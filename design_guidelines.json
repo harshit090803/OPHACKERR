@@ -1,0 +1,136 @@
+{
+  "theme": "toggle",
+  "typography": {
+    "fonts_to_install": [
+      "@fontsource/outfit",
+      "@fontsource/figtree"
+    ],
+    "headings": {
+      "family": "Outfit, sans-serif",
+      "weights": ["400", "700", "900"],
+      "styles": "tracking-tight, font-bold, never center by default"
+    },
+    "body": {
+      "family": "Figtree, sans-serif",
+      "weights": ["400", "500", "600"],
+      "styles": "leading-relaxed, left-aligned"
+    }
+  },
+  "colors": {
+    "strategy": "Archetype 3: Pastel & Soft with E1 Neo-Brutalist Twist (Hard borders + soft pastels). Grounded, approachable, yet highly structured for learning.",
+    "light": {
+      "background": "#FAFAFA",
+      "foreground": "#171717",
+      "primary": "#FDE047",
+      "primary_foreground": "#171717",
+      "secondary": "#A7F3D0",
+      "secondary_foreground": "#171717",
+      "accent": "#DDD6FE",
+      "accent_foreground": "#171717",
+      "card": "#FFFFFF",
+      "border": "#171717",
+      "ring": "#171717",
+      "muted": "#F4F4F5",
+      "muted_foreground": "#52525B"
+    },
+    "dark": {
+      "background": "#0A0A0A",
+      "foreground": "#FAFAFA",
+      "primary": "#FDE047",
+      "primary_foreground": "#171717",
+      "secondary": "#A7F3D0",
+      "secondary_foreground": "#171717",
+      "accent": "#DDD6FE",
+      "accent_foreground": "#171717",
+      "card": "#171717",
+      "border": "#52525B",
+      "ring": "#FDE047",
+      "muted": "#262626",
+      "muted_foreground": "#A1A1AA"
+    },
+    "rules": [
+      "Use 2px solid black borders for cards and buttons in light mode. In dark mode, use subtle gray borders (border-neutral-800) but keep vivid button colors.",
+      "Avoid default soft shadows. Use hard offset shadows.",
+      "Never use full-screen gradients. Keep the reading experience high-contrast and distraction-free."
+    ]
+  },
+  "visual_enhancers": {
+    "shadows": {
+      "neo_brutalist_light": "shadow-[4px_4px_0px_#171717]",
+      "neo_brutalist_hover_light": "hover:shadow-[6px_6px_0px_#171717]",
+      "neo_brutalist_dark": "shadow-[4px_4px_0px_#52525B]",
+      "neo_brutalist_hover_dark": "hover:shadow-[6px_6px_0px_#FDE047]"
+    },
+    "borders": {
+      "default_light": "border-2 border-[#171717]",
+      "default_dark": "border-2 border-neutral-700"
+    },
+    "radii": {
+      "default": "rounded-xl for cards, rounded-full for main action pills"
+    }
+  },
+  "layouts": {
+    "strategy": "High Density Grid for the main dashboard combined with single focused views for studying.",
+    "grid_modes": {
+      "dashboard": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6",
+      "upload_history": "col-span-1 md:col-span-3",
+      "flashcard_player": "flex flex-col items-center justify-center min-h-[60vh] max-w-2xl mx-auto w-full",
+      "quiz_player": "max-w-3xl mx-auto w-full space-y-8"
+    },
+    "spacing": "Generous internal padding on cards (p-6 or p-8) to avoid text hitting the heavy borders."
+  },
+  "motion": {
+    "flashcard_flip": "Use framer-motion. Animate rotateY(180deg) for the card flip. Ensure backface-visibility is hidden.",
+    "hover_states": "translate-x-[-2px] translate-y-[-2px] active:translate-x-[0px] active:translate-y-[0px] active:shadow-none",
+    "transitions": "transition-transform transition-shadow duration-200 ease-out (Target specific properties, NEVER transition: all)"
+  },
+  "components_strategy": {
+    "buttons": "Pill-shaped or rounded-lg. Must have 2px border, solid pastel backgrounds, and a hard shadow.",
+    "cards": "Background matches theme, solid border, hard shadow. Do not overuse cards; keep lists flat with bottom borders.",
+    "inputs": "Solid border, focus:ring-0 focus:border-black focus:shadow-[4px_4px_0px_#171717].",
+    "upload_zone": "Dashed thick border. On drag over: change background to a pastel tint (e.g., #DDD6FE) and scale up icon slightly."
+  },
+  "icons": {
+    "library": "lucide-react",
+    "usage": "Use stroke-width 2.2 for a slightly bolder, more graphic feel that matches the neo-brutalist typography."
+  },
+  "media": {
+    "images": [
+      {
+        "url": "https://images.unsplash.com/photo-1643916861364-02e63ce3e52f",
+        "category": "empty_state",
+        "description": "Pastel abstract geometric background used for empty states (e.g., no study material uploaded yet) or login backgrounds."
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1622547748225-3fc4abd2cca0",
+        "category": "hero_illustration",
+        "description": "Abstract shapes for decorative dashboard elements or generic topic thumbnails."
+      }
+    ],
+    "rules": "No placeholder URLs. Always use real UI states or the provided abstract imagery."
+  },
+  "accessibility": {
+    "contrast": "Ensure minimum 4.5:1 contrast. Black text on pastel backgrounds is highly legible. In dark mode, ensure text is bright (#FAFAFA) on dark cards.",
+    "data_testid": "All interactive and key informational elements MUST include a data-testid attribute.",
+    "motion": "Respect prefers-reduced-motion for flashcard flips (fallback to crossfade)."
+  },
+  "instructions_to_main_agent": [
+    "Implement the Neo-Brutalist pastel theme (Archetype 3) for a study tool that feels engaging, structured, and modern.",
+    "Do NOT use standard soft box-shadows. Use hard offset shadows (e.g., shadow-[4px_4px_0px_#171717] in light mode).",
+    "Override default Shadcn card and button borders to be thicker (2px) and high contrast.",
+    "For the flashcard player, use 'framer-motion' for a smooth 3D flip effect on the Y-axis. Provide 'Mark Known/Unknown' controls.",
+    "The Quiz player should present one question at a time or a clearly separated list. Use pastel background highlights for selected answers.",
+    "The UI must not have transparent headers. Use solid backgrounds with bottom borders for the navigation.",
+    "Use data-testid on all key elements (buttons, inputs, cards, flip triggers) for robust testing.",
+    "Install and configure Outfit and Figtree fonts. Ensure headings are tracking-tight and body text is leading-relaxed.",
+    "Ensure 'lucide-react' icons are heavily utilized for actions like 'Upload', 'History', 'Flip', 'Next', 'Previous'."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "Do not use generic centered layouts or simplistic gradients.",
+    "Create depth through hard shadows and borders, not blurs.",
+    "Never apply universal transitions (transition: all). Target specific properties like transform and box-shadow.",
+    "Never use AI emoji characters.",
+    "Provide micro-animations for interactions (e.g., hover states shift up and left with increased shadow, active states press down).",
+    "Use 2-3x more spacing than feels comfortable. Cramped designs look cheap."
+  ]
+}
