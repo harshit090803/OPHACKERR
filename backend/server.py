@@ -1,4 +1,4 @@
-"""StudyPilot AI backend - PDF to Quiz + Flashcards using Anthropic Claude."""
+"""StudyPilot AI backend - Anthropic Claude + fast teacher startup."""
 
 import base64
 import io
@@ -28,12 +28,14 @@ mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
-# Anthropic Claude configuration
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5")
 anthropic_client: Optional[anthropic.AsyncAnthropic] = None
-
 EDGE_TTS_VOICE = os.environ.get("EDGE_TTS_VOICE", "en-US-GuyNeural")
+
+# Keep teacher responses fast. Large generation jobs can still request more tokens explicitly.
+TEACHER_MAX_TOKENS = int(os.environ.get("TEACHER_MAX_TOKENS", "900"))
+TEACHER_TIMEOUT = float(os.environ.get("TEACHER_TIMEOUT", "45"))
 
 app = FastAPI(title="StudyPilot AI")
 api_router = APIRouter(prefix="/api")
@@ -41,7 +43,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
-# ============ MODELS ============
 class Document(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     filename: str
@@ -78,22 +79,22 @@ class DocumentSummary(BaseModel):
 
 
 # ============ AI CLIENT ============
-def _get_anthropic_client() -> anthropic.AsyncAnthropic:
+def _get_anthropic_client(timeout: float = 60.0) -> anthropic.AsyncAnthropic:
     global anthropic_client
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured.")
     if anthropic_client is None:
+        # Reuse one persistent HTTP connection instead of creating a client for every teacher request.
         anthropic_client = anthropic.AsyncAnthropic(
             api_key=ANTHROPIC_API_KEY,
-            timeout=600.0,
-            max_retries=2,
+            timeout=timeout,
+            max_retries=1,
         )
     return anthropic_client
 
 
-async def _llm_text(system: str, user: str, max_tokens: int = 8000) -> str:
-    """Generate text with Anthropic Claude using the official async SDK."""
-    response = await _get_anthropic_client().messages.create(
+async def _llm_text(system: str, user: str, max_tokens: int = 8000, *, timeout: Optional[float] = None) -> str:
+    response = await _get_anthropic_client(timeout or 60.0).messages.create(
         model=ANTHROPIC_MODEL,
         max_tokens=max_tokens,
         temperature=0.4,
@@ -125,6 +126,8 @@ async def _llm_json(system: str, user: str, max_tokens: int = 8000) -> dict:
 
 # ============ TTS ============
 async def _edge_tts_base64(text: str, voice: str = None) -> str:
+    # Cap accidental giant TTS requests; shorter speech also starts playing faster on the client.
+    text = text.strip()[:5000]
     communicate = edge_tts.Communicate(text, voice or EDGE_TTS_VOICE)
     buf = io.BytesIO()
     async for chunk in communicate.stream():
@@ -202,29 +205,15 @@ def _valid_mcq(q: Any) -> bool:
     if not isinstance(q, dict):
         return False
     options = q.get("options", [])
-    return (
-        len(options) == 4
-        and all(isinstance(x, str) and len(x.strip()) >= 2 for x in options)
-        and q.get("correct_answer") in options
-        and len(q.get("question", "").strip()) >= 8
-        and bool(q.get("explanation", "").strip())
-    )
+    return len(options) == 4 and all(isinstance(x, str) and len(x.strip()) >= 2 for x in options) and q.get("correct_answer") in options and len(q.get("question", "").strip()) >= 8 and bool(q.get("explanation", "").strip())
 
 
 def _valid_flashcard(f: Any) -> bool:
-    return (
-        isinstance(f, dict)
-        and len(f.get("question", "").strip()) >= 6
-        and len(f.get("answer", "").strip()) >= 3
-    )
+    return isinstance(f, dict) and len(f.get("question", "").strip()) >= 6 and len(f.get("answer", "").strip()) >= 3
 
 
 async def generate_study_content(text: str, session_id: str) -> dict:
-    data = await _llm_json(
-        SYSTEM_PROMPT,
-        f"STUDY MATERIAL:\n\n{text}\n\nGenerate the quiz and flashcards as pure JSON.",
-        max_tokens=8000,
-    )
+    data = await _llm_json(SYSTEM_PROMPT, f"STUDY MATERIAL:\n\n{text}\n\nGenerate the quiz and flashcards as pure JSON.", max_tokens=8000)
     quiz = [_shuffle_mcq_options(q) for q in data.get("quiz", []) if _valid_mcq(q)]
     flashcards = [f for f in data.get("flashcards", []) if _valid_flashcard(f)]
     topics = data.get("topics", []) or sorted({q.get("topic", "") for q in quiz if q.get("topic")})
@@ -254,7 +243,7 @@ async def process_document(doc_id: str):
 # ============ CHAT ============
 TEACHER_PROMPT = """You are Professor StudyPilot, a warm, patient university teacher with 20+ years of classroom experience. You tutor ONE student using the supplied study material as the source of truth.
 
-Explain clearly with examples and analogies. Adapt to the student's level. Prefer short paragraphs and bullets. If asked to teach a concept, give intuition, definition, example, and why it matters. Ask one thoughtful check-for-understanding question after substantive explanations.
+Give a fast, focused spoken-style answer. Keep normal teacher answers under about 150 words unless the student explicitly asks for detail. Explain with one useful example or analogy when needed. If asked to teach a concept, give intuition, definition, example, and why it matters. Ask at most one short check-for-understanding question after substantive explanations.
 
 Ground explanations in the study material. If a question is outside the material, say so briefly and give a short general answer if useful. Never invent facts that contradict the material.
 
@@ -265,7 +254,6 @@ STUDY MATERIAL:
 """
 
 
-# ============ LESSON ============
 LESSON_PLAN_PROMPT = """You are Professor StudyPilot, an experienced university teacher preparing a video lecture from the study material.
 
 Produce ONLY valid JSON. Each slide contains title, bullets, narration, and optional pop_quiz. Narration is 90-200 words of warm spoken prose. Cover every important exam-worthy concept without inventing facts.
@@ -292,14 +280,10 @@ async def _generate_lesson_plan(material: str) -> dict:
         pop = item.get("pop_quiz")
         pop = _shuffle_mcq_options(pop) if pop and _valid_mcq(pop) else None
         slides.append({"title": title[:80], "bullets": bullets[:6], "narration": narration[:3900], "pop_quiz": pop})
-    homework = [
-        {"question": str(x.get("question", "")).strip()[:400], "guidance": str(x.get("guidance", "")).strip()[:400]}
-        for x in data.get("homework", []) if isinstance(x, dict) and x.get("question")
-    ]
+    homework = [{"question": str(x.get("question", "")).strip()[:400], "guidance": str(x.get("guidance", "")).strip()[:400]} for x in data.get("homework", []) if isinstance(x, dict) and x.get("question")]
     return {"title": str(data.get("title", "Lesson")).strip()[:80], "slides": slides[:25], "homework": homework[:5]}
 
 
-# ============ ROUTES ============
 @api_router.get("/")
 async def root():
     return {"service": "StudyPilot AI", "status": "ok"}
@@ -348,132 +332,49 @@ async def delete_document(doc_id: str):
     return {"ok": True}
 
 
-@api_router.post("/documents/{doc_id}/regenerate")
-async def regenerate(doc_id: str, background_tasks: BackgroundTasks):
-    if not await db.documents.find_one({"id": doc_id}):
-        raise HTTPException(status_code=404, detail="Document not found")
-    await db.documents.update_one({"id": doc_id}, {"$set": {"status": "pending", "error": None, "quiz": [], "flashcards": []}})
-    background_tasks.add_task(process_document, doc_id)
-    return {"ok": True, "status": "pending"}
-
-
-@api_router.get("/documents/{doc_id}/chat")
-async def get_chat(doc_id: str):
-    doc = await db.documents.find_one({"id": doc_id}, {"_id": 0, "chat_history": 1})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return {"messages": doc.get("chat_history", [])}
-
-
 @api_router.post("/documents/{doc_id}/chat")
 async def chat_with_teacher(doc_id: str, payload: ChatMessage):
-    doc = await db.documents.find_one({"id": doc_id})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-    if doc.get("status") != "ready":
-        raise HTTPException(status_code=400, detail="Study material is still being processed. Please wait a moment.")
-    user_text = (payload.message or "").strip()
-    if not user_text:
-        raise HTTPException(status_code=400, detail="Message is empty")
-    material = clean_text(doc.get("raw_text", ""))[:40000]
-    history = doc.get("chat_history", [])
-    recent = "\n".join(f"{x['role'].upper()}: {x['content']}" for x in history[-8:])
-    prompt = f"Conversation so far:\n{recent}\n\nSTUDENT: {user_text}" if recent else user_text
-    try:
-        reply = await _llm_text(TEACHER_PROMPT.format(material=material), prompt, max_tokens=1200)
-    except Exception as exc:
-        logger.exception("teacher chat failed")
-        raise HTTPException(status_code=500, detail=f"Teacher is unavailable: {exc}")
-    now = datetime.now(timezone.utc).isoformat()
-    user_turn = {"role": "user", "content": user_text, "ts": now}
-    bot_turn = {"role": "teacher", "content": reply.strip(), "ts": now}
-    await db.documents.update_one({"id": doc_id}, {"$push": {"chat_history": {"$each": [user_turn, bot_turn]}}})
-    return {"reply": bot_turn["content"], "messages": history + [user_turn, bot_turn]}
-
-
-@api_router.delete("/documents/{doc_id}/chat")
-async def clear_chat(doc_id: str):
-    result = await db.documents.update_one({"id": doc_id}, {"$set": {"chat_history": []}})
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return {"ok": True}
-
-
-@api_router.get("/documents/{doc_id}/lesson")
-async def get_lesson(doc_id: str):
     doc = await db.documents.find_one({"id": doc_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    if doc.get("status") != "ready":
-        raise HTTPException(status_code=400, detail="Study material is still being processed.")
-    lesson = doc.get("lesson")
-    if lesson and lesson.get("slides"):
-        return lesson
-    lesson = await _generate_lesson_plan(clean_text(doc.get("raw_text", ""))[:50000])
-    if not lesson["slides"]:
-        raise HTTPException(status_code=500, detail="Could not build a lesson from this material.")
-    await db.documents.update_one({"id": doc_id}, {"$set": {"lesson": lesson}})
-    return lesson
-
-
-@api_router.post("/documents/{doc_id}/lesson/regenerate")
-async def regen_lesson(doc_id: str):
-    if not await db.documents.find_one({"id": doc_id}):
-        raise HTTPException(status_code=404, detail="Document not found")
-    await db.documents.update_one({"id": doc_id}, {"$unset": {"lesson": ""}})
-    return await get_lesson(doc_id)
+    material = clean_text(doc.get("raw_text", ""))
+    # Limit context for interactive teacher turns. This dramatically reduces prompt processing time.
+    material_for_teacher = material[:18000]
+    history = doc.get("chat_history", [])[-4:]
+    history_text = "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')}" for m in history)
+    user = f"RECENT CONVERSATION:\n{history_text}\n\nSTUDENT QUESTION:\n{payload.message.strip()}"
+    answer = await _llm_text(TEACHER_PROMPT.format(material=material_for_teacher), user, max_tokens=TEACHER_MAX_TOKENS, timeout=TEACHER_TIMEOUT)
+    now = datetime.now(timezone.utc).isoformat()
+    updated_history = history + [{"role": "user", "content": payload.message.strip(), "created_at": now}, {"role": "assistant", "content": answer, "created_at": now}]
+    await db.documents.update_one({"id": doc_id}, {"$set": {"chat_history": updated_history[-10:]}})
+    return {"answer": answer}
 
 
 @api_router.post("/tts")
 async def tts(payload: TTSRequest):
-    text = (payload.text or "").strip()[:4000]
-    if not text:
-        raise HTTPException(status_code=400, detail="Text is empty")
-    try:
-        audio_b64 = await _edge_tts_base64(text)
-    except Exception as exc:
-        logger.exception("tts failed")
-        raise HTTPException(status_code=500, detail=f"TTS failed: {exc}")
-    return {"audio_base64": audio_b64, "mime": "audio/mp3"}
+    return {"audio_base64": await _edge_tts_base64(payload.text)}
 
 
-@api_router.post("/stt")
-async def stt(file: UploadFile = File(...)):
-    raise HTTPException(status_code=501, detail="STT needs a speech-to-text backend. Install faster-whisper for local STT or configure an STT provider.")
-
-
-@api_router.post("/documents/{doc_id}/voice-ask")
+@api_router.post("/voice-ask")
 async def voice_ask(doc_id: str, payload: VoiceAskRequest):
-    doc = await db.documents.find_one({"id": doc_id})
+    doc = await db.documents.find_one({"id": doc_id}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-    if doc.get("status") != "ready":
-        raise HTTPException(status_code=400, detail="Study material is still being processed.")
-    question = (payload.text or "").strip()
-    if not question:
-        raise HTTPException(status_code=400, detail="Question is empty")
-    material = clean_text(doc.get("raw_text", ""))[:35000]
-    system = TEACHER_PROMPT.format(material=material) + "\n\nReply as spoken prose only, with no markdown, headings, or bullets. Keep it under 120 words."
-    try:
-        answer = (await _llm_text(system, question, max_tokens=600)).strip()
-    except Exception as exc:
-        logger.exception("voice-ask failed")
-        raise HTTPException(status_code=500, detail=f"Teacher unavailable: {exc}")
-    try:
-        audio_b64 = await _edge_tts_base64(answer[:3900])
-    except Exception:
-        audio_b64 = None
-    return {"question": question, "answer": answer, "audio_base64": audio_b64, "mime": "audio/mp3"}
+    material = clean_text(doc.get("raw_text", ""))[:18000]
+    answer = await _llm_text(TEACHER_PROMPT.format(material=material), f"STUDENT SPOKEN QUESTION:\n{payload.text.strip()}", max_tokens=TEACHER_MAX_TOKENS, timeout=TEACHER_TIMEOUT)
+    audio = await _edge_tts_base64(answer)
+    return {"answer": answer, "audio_base64": audio}
+
+
+@api_router.post("/documents/{doc_id}/lesson")
+async def generate_lesson(doc_id: str):
+    doc = await db.documents.find_one({"id": doc_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return await _generate_lesson_plan(clean_text(doc.get("raw_text", "")))
 
 
 app.include_router(api_router)
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 @app.on_event("shutdown")
