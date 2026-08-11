@@ -1,0 +1,153 @@
+name: Migrate StudyPilot to Anthropic
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Migrate Ollama integration to Anthropic
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          server_path = Path('backend/server.py')
+          req_path = Path('backend/requirements.txt')
+          server = server_path.read_text(encoding='utf-8')
+
+          # Remove the Ollama/httpx client setup.
+          server = server.replace('import httpx\n', '')
+          server = server.replace('import edge_tts\n', 'import edge_tts\nfrom anthropic import AsyncAnthropic\n')
+
+          old = '''# Ollama API (cloud or local) — model can be DeepSeek V4 Flash on Ollama cloud
+          OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY") or ""
+          OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "https://ollama.com").rstrip("/")
+          OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "deepseek-v4-flash")
+          # Male teacher voice (matches avatar) — free Microsoft Edge neural TTS
+          EDGE_TTS_VOICE = os.environ.get("EDGE_TTS_VOICE", "en-US-GuyNeural")
+
+          # Direct REST via httpx — respects SSL_VERIFY=false on Windows
+          _httpx_timeout = httpx.Timeout(600.0, connect=30.0)
+          _httpx_client = httpx.AsyncClient(verify=_ssl_verify, timeout=_httpx_timeout)
+          '''
+          new = '''# Anthropic Claude configuration
+          ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY") or ""
+          ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+          anthropic_client = None
+          # Male teacher voice (matches avatar) — free Microsoft Edge neural TTS
+          EDGE_TTS_VOICE = os.environ.get("EDGE_TTS_VOICE", "en-US-GuyNeural")
+          '''
+          if old not in server:
+              raise SystemExit('Expected Ollama configuration block not found')
+          server = server.replace(old, new, 1)
+
+          llm_pattern = re.compile(
+              r'async def _llm_text\(system: str, user: str, max_tokens: int = 8000\) -> str:\n'
+              r'.*?\n\nasync def _llm_json\(system: str, user: str, max_tokens: int = 8000\) -> dict:',
+              re.S,
+          )
+          llm_replacement = '''async def _llm_text(system: str, user: str, max_tokens: int = 8000) -> str:
+              """Call Anthropic Claude through the official Python SDK."""
+              global anthropic_client
+              if not ANTHROPIC_API_KEY:
+                  raise RuntimeError("ANTHROPIC_API_KEY is not configured.")
+              if anthropic_client is None:
+                  anthropic_client = AsyncAnthropic(
+                      api_key=ANTHROPIC_API_KEY,
+                      timeout=600.0,
+                      max_retries=2,
+                  )
+              response = await anthropic_client.messages.create(
+                  model=ANTHROPIC_MODEL,
+                  max_tokens=max_tokens,
+                  temperature=0.4,
+                  system=system,
+                  messages=[{"role": "user", "content": user}],
+              )
+              text = "".join(
+                  block.text for block in response.content
+                  if getattr(block, "type", None) == "text"
+              ).strip()
+              if not text:
+                  raise RuntimeError("Anthropic returned an empty response.")
+              return text
+
+          async def _llm_json(system: str, user: str, max_tokens: int = 8000) -> dict:'''
+          server, n = llm_pattern.subn(llm_replacement, server, count=1)
+          if n != 1:
+              raise SystemExit('Expected Ollama LLM function block not found')
+
+          server = server.replace(
+              '"""StudyPilot AI backend - PDF to Quiz + Flashcards using DeepSeek."""',
+              '"""StudyPilot AI backend - PDF to Quiz + Flashcards using Anthropic Claude."""',
+              1,
+          )
+
+          # Anthropic SDK handles TLS itself; remove the old insecure SSL override block.
+          ssl_start = server.find('# --- SSL / env first (Windows cert issues) ---')
+          fastapi_start = server.find('from fastapi import', ssl_start)
+          if ssl_start != -1 and fastapi_start != -1:
+              server = server[:ssl_start] + server[fastapi_start:]
+
+          server = server.replace(
+              '''@app.on_event("shutdown")
+          async def shutdown_db_client():
+              client.close()
+          ''',
+              '''@app.on_event("shutdown")
+          async def shutdown_clients():
+              global anthropic_client
+              if anthropic_client is not None:
+                  await anthropic_client.close()
+              client.close()
+          ''',
+              1,
+          )
+
+          server_path.write_text(server, encoding='utf-8')
+
+          req = req_path.read_text(encoding='utf-8').splitlines()
+          req = [line for line in req if not line.lower().startswith('httpx')]
+          if not any(line.lower().startswith('anthropic') for line in req):
+              req.append('anthropic>=0.104.1')
+          req_path.write_text('\n'.join(req) + '\n', encoding='utf-8')
+
+          env = Path('backend/.env.example')
+          env.write_text('''# MongoDB
+          MONGO_URL="mongodb://localhost:27017"
+          DB_NAME="studypilot"
+          CORS_ORIGINS="*"
+
+          # Anthropic Claude
+          ANTHROPIC_API_KEY="your-anthropic-api-key"
+          ANTHROPIC_MODEL="claude-sonnet-4-5"
+
+          # Microsoft Edge neural TTS
+          EDGE_TTS_VOICE="en-US-GuyNeural"
+          ''', encoding='utf-8')
+
+      - name: Validate migration
+        run: |
+          python -m py_compile backend/server.py
+          ! grep -R "OLLAMA_\|ollama.com\|/api/chat" backend/server.py
+          grep -q "anthropic" backend/requirements.txt
+          grep -q "ANTHROPIC_API_KEY" backend/server.py
+
+      - name: Commit migration and remove temporary workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/server.py backend/requirements.txt backend/.env.example
+          git rm .github/workflows/migrate-ollama-to-anthropic.yml
+          git commit -m "Migrate StudyPilot from Ollama to Anthropic"
+          git push
