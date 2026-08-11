@@ -49,7 +49,7 @@ Cleaner: strip page numbers, subject codes (CS-101),
          copyright, references, URLs, running headers
    ↓
 Claude Sonnet 4.5 — quiz + flashcards (strict quality prompt)
-Claude Sonnet 4.5 — structured lesson plan (6-10 slides + homework)
+Claude Sonnet 4.5 — structured lesson plan (scale with material depth)
    ↓
 edge-tts (Microsoft neural) — free voice narration per slide
 Raise-hand STT is optional (local Whisper or OpenAI)
@@ -67,7 +67,8 @@ Beautiful, interactive UI
 | Fonts | Outfit (display) + Figtree (body) |
 | Design | Neo-brutalist pastel — hard 2px black borders, 4px offset drop shadows, no gradients |
 | Backend | FastAPI, Motor (async MongoDB), pypdf |
-| AI | Claude Sonnet 4.5 (Anthropic API) + OpenAI TTS-1 (voice=coral) + OpenAI Whisper || Database | MongoDB (documents, generated content, chat history, lesson cache) |
+| AI | Claude Sonnet 4.5 (Anthropic API) + edge-tts |
+| Database | MongoDB (documents, generated content, chat history, lesson cache) |
 
 ---
 
@@ -114,9 +115,9 @@ All endpoints are prefixed with `/api`.
 |---|---|---|
 | `GET` | `/api/documents/{id}/lesson` | Get (or build + cache) the structured lesson plan: `{title, slides[], homework[]}`. |
 | `POST` | `/api/documents/{id}/lesson/regenerate` | Wipe and rebuild the lesson. |
-| `POST` | `/api/tts` | `{text}` → `{audio_base64, mime:"audio/mp3"}` via OpenAI TTS. |
-| `POST` | `/api/stt` | Upload audio blob → `{text}` via OpenAI Whisper. |
-| `POST` | `/api/documents/{id}/voice-ask` | `{text}` → `{answer, audio_base64}`. Student's spoken question → Claude → TTS reply. |
+| `POST` | `/api/tts` | `{text}` → `{audio_base64, mime:"audio/mp3"}` via edge-tts. |
+| `POST` | `/api/stt` | Upload audio blob → STT backend (optional). |
+| `POST` | `/api/documents/{id}/voice-ask` | `{text}` → `{answer, audio_base64}`. Student's question → Claude → edge-tts reply. |
 
 ### Chat
 | Method | Path | Purpose |
@@ -144,8 +145,8 @@ cat > .env <<'EOF'
 MONGO_URL="mongodb://localhost:27017"
 DB_NAME="studypilot"
 CORS_ORIGINS="*"
-GEMINI_API_KEY=your-gemini-api-key
-SSL_VERIFY=false
+ANTHROPIC_API_KEY=your-anthropic-api-key
+ANTHROPIC_MODEL=claude-sonnet-4-5
 EDGE_TTS_VOICE=en-US-GuyNeural
 EOF
 
@@ -157,7 +158,6 @@ uvicorn server:app --host 0.0.0.0 --port 8001 --reload
 cd frontend
 yarn install
 
-# Create frontend/.env
 echo 'REACT_APP_BACKEND_URL=http://localhost:8001' > .env
 
 yarn start
@@ -175,10 +175,9 @@ Open http://localhost:3000, drop a PDF, and start class.
 | `MONGO_URL` | MongoDB connection string |
 | `DB_NAME` | Database name |
 | `CORS_ORIGINS` | Comma-separated allowed origins (`*` for local dev) |
-| `GEMINI_API_KEY` | Google Gemini API key (quiz, flashcards, chat, lessons) |
-| `GEMINI_MODEL` | Optional. Default `gemini-2.0-flash` |
-| `SSL_VERIFY` | Set `false` on Windows if SSL certificate errors occur |
-| `EDGE_TTS_VOICE` | Optional. Microsoft Edge voice (default: `en-US-GuyNeural`) |
+| `ANTHROPIC_API_KEY` | Anthropic Claude API key |
+| `ANTHROPIC_MODEL` | Claude model name (default: `claude-sonnet-4-5`) |
+| `EDGE_TTS_VOICE` | Optional Microsoft Edge voice (default: `en-US-GuyNeural`) |
 
 **frontend/.env**
 | Key | Description |
@@ -189,27 +188,18 @@ Open http://localhost:3000, drop a PDF, and start class.
 
 ---
 
-## Design System
-
-- Colors: pastel canvas (`#FAFAFA`) with signature accents `#FDE047` (yellow), `#A7F3D0` (mint), `#DDD6FE` (lavender), `#FBCFE8` (pink), `#BAE6FD` (sky), `#FED7AA` (peach)
-- Chalkboard: `#0F2A22` background with `#FEF3C7` chalk text
-- Elevation: 2 px black border + 4-6 px offset shadow on hover — no gradients, no purple-on-white AI-slop
-- Type: **Outfit** 700/900 for display, **Figtree** 400/500/600 for body
-
----
-
 ## What's Verified
 
-- Backend pytest: **26 / 26** passing (upload + generation + chat + video teacher + TTS + STT + voice-ask)
-- Frontend E2E: video class, quiz, flashcards, library, chat, homework, pop-quiz, mic Q&A all pass
-- Live integrations checked: Claude Sonnet 4.5 produces 6-10 well-formed slides; OpenAI TTS returns real MP3 (>10 KB per sentence); Whisper transcribes those MP3s back correctly
+- Backend tests cover upload, generation, chat, video teacher, TTS, STT and voice-ask flows.
+- Claude Sonnet 4.5 is used for quiz, flashcard, lesson-plan and teacher-chat generation.
+- edge-tts remains the free voice layer.
 
 ---
 
 ## Roadmap
 
 - **Streaming Narration** — first token in <1 s instead of waiting for the full TTS blob
-- **Multiple Teachers** — pick a persona and voice (calm mentor, energetic coach, drill sergeant)
+- **Multiple Teachers** — pick a persona and voice
 - **Whiteboard Drawings** — professor sketches diagrams while explaining
 - **Class Recording** — save the whole video class as a shareable replay link
 - **Spaced Repetition** — resurface weak flashcards on a smart schedule
@@ -223,4 +213,4 @@ Personal / educational use.
 
 ---
 
-Powered by Google Gemini + free edge-tts (Microsoft voices).
+Powered by Anthropic Claude + free edge-tts (Microsoft voices).
