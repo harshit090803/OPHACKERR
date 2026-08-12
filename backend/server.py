@@ -39,7 +39,7 @@ TEACHER_TIMEOUT = float(os.environ.get("TEACHER_TIMEOUT", "45"))
 anthropic_client: Optional[anthropic.AsyncAnthropic] = None
 anthropic_http_client: Optional[httpx.AsyncClient] = None
 
-app = FastAPI(title="StudyPilot AI")
+app = FastAPI(title="StudyPilot")
 api_router = APIRouter(prefix="/api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
