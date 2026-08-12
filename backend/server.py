@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import re
+import ssl
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,13 +92,16 @@ def _get_anthropic_client(timeout: float = 60.0) -> anthropic.AsyncAnthropic:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured.")
 
     if anthropic_client is None:
-        # Keep TLS verification enabled. Explicitly use certifi and ignore
-        # broken Windows/Python SSL_* and proxy environment configuration.
+        # Keep TLS verification enabled. Use certifi explicitly and ignore
+        # proxy environment configuration, which is important on Windows.
         ca_bundle = certifi.where()
         logger.info("Anthropic CA bundle: %s", ca_bundle)
+        logger.info("OpenSSL version: %s", ssl.OPENSSL_VERSION)
         logger.info("Anthropic HTTPX trust_env: False")
+
+        ssl_context = ssl.create_default_context(cafile=ca_bundle)
         anthropic_http_client = httpx.AsyncClient(
-            verify=ca_bundle,
+            verify=ssl_context,
             trust_env=False,
             timeout=httpx.Timeout(timeout, connect=20.0),
             follow_redirects=True,
