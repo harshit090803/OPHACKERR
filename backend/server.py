@@ -91,13 +91,17 @@ def _get_anthropic_client(timeout: float = 60.0) -> anthropic.AsyncAnthropic:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured.")
 
     if anthropic_client is None:
-        # Use certifi explicitly. This avoids the Python/Windows CA bundle issue
-        # that was causing: Basic Constraints of CA cert not marked critical.
-        logger.info("Anthropic CA bundle: %s", certifi.where())
+        # Keep TLS verification enabled. Explicitly use certifi and ignore
+        # broken Windows/Python SSL_* and proxy environment configuration.
+        ca_bundle = certifi.where()
+        logger.info("Anthropic CA bundle: %s", ca_bundle)
+        logger.info("Anthropic HTTPX trust_env: False")
         anthropic_http_client = httpx.AsyncClient(
-            verify=certifi.where(),
+            verify=ca_bundle,
+            trust_env=False,
             timeout=httpx.Timeout(timeout, connect=20.0),
             follow_redirects=True,
+            http2=False,
         )
         anthropic_client = anthropic.AsyncAnthropic(
             api_key=ANTHROPIC_API_KEY,
@@ -343,10 +347,7 @@ async def process_document(doc_id: str):
             {"$set": {"status": "ready", **result}},
         )
 
-        logger.info(
-            "Document ready: %s",
-            doc_id,
-        )
+        logger.info("Document ready: %s", doc_id)
 
     except Exception as exc:
         logger.exception("process_document failed")
@@ -493,49 +494,29 @@ async def upload_pdf(
     file: UploadFile = File(...),
 ):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF files are supported.",
-        )
+        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
     contents = await file.read()
 
     if len(contents) > 15 * 1024 * 1024:
-        raise HTTPException(
-            status_code=400,
-            detail="PDF exceeds 15MB limit.",
-        )
+        raise HTTPException(status_code=400, detail="PDF exceeds 15MB limit.")
 
     try:
         raw_text = extract_pdf_text(contents)
     except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to read PDF: {exc}",
-        )
+        raise HTTPException(status_code=400, detail=f"Failed to read PDF: {exc}")
 
     if len(raw_text.strip()) < 100:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not extract text. The PDF may be a scanned image.",
-        )
+        raise HTTPException(status_code=400, detail="Could not extract text. The PDF may be a scanned image.")
 
-    doc = Document(
-        filename=file.filename,
-        text_length=len(raw_text),
-    )
-
+    doc = Document(filename=file.filename, text_length=len(raw_text))
     record = doc.model_dump()
     record["raw_text"] = raw_text
 
     await db.documents.insert_one(record)
     background_tasks.add_task(process_document, doc.id)
 
-    return {
-        "id": doc.id,
-        "filename": doc.filename,
-        "status": "processing",
-    }
+    return {"id": doc.id, "filename": doc.filename, "status": "processing"}
 
 
 # ============================================================
@@ -544,13 +525,7 @@ async def upload_pdf(
 
 @api_router.get("/documents", response_model=List[DocumentSummary])
 async def list_documents():
-    docs = await db.documents.find(
-        {},
-        {"_id": 0, "raw_text": 0},
-    ).sort(
-        "created_at",
-        -1,
-    ).to_list(200)
+    docs = await db.documents.find({}, {"_id": 0, "raw_text": 0}).sort("created_at", -1).to_list(200)
 
     return [
         DocumentSummary(
@@ -568,68 +543,32 @@ async def list_documents():
 
 @api_router.get("/documents/{doc_id}")
 async def get_document(doc_id: str):
-    doc = await db.documents.find_one(
-        {"id": doc_id},
-        {"_id": 0, "raw_text": 0},
-    )
-
+    doc = await db.documents.find_one({"id": doc_id}, {"_id": 0, "raw_text": 0})
     if not doc:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found",
-        )
-
+        raise HTTPException(status_code=404, detail="Document not found")
     return doc
 
 
 @api_router.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str):
-    result = await db.documents.delete_one(
-        {"id": doc_id}
-    )
-
+    result = await db.documents.delete_one({"id": doc_id})
     if result.deleted_count == 0:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found",
-        )
-
+        raise HTTPException(status_code=404, detail="Document not found")
     return {"ok": True}
 
 
 @api_router.post("/documents/{doc_id}/regenerate")
-async def regenerate_document(
-    doc_id: str,
-    background_tasks: BackgroundTasks,
-):
-    doc = await db.documents.find_one(
-        {"id": doc_id},
-        {"_id": 0, "id": 1},
-    )
-
+async def regenerate_document(doc_id: str, background_tasks: BackgroundTasks):
+    doc = await db.documents.find_one({"id": doc_id}, {"_id": 0, "id": 1})
     if not doc:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found",
-        )
+        raise HTTPException(status_code=404, detail="Document not found")
 
     await db.documents.update_one(
         {"id": doc_id},
-        {"$set": {
-            "status": "processing",
-            "error": None,
-        }},
+        {"$set": {"status": "processing", "error": None}},
     )
-
-    background_tasks.add_task(
-        process_document,
-        doc_id,
-    )
-
-    return {
-        "id": doc_id,
-        "status": "processing",
-    }
+    background_tasks.add_task(process_document, doc_id)
+    return {"id": doc_id, "status": "processing"}
 
 
 # ============================================================
@@ -638,134 +577,69 @@ async def regenerate_document(
 
 @api_router.get("/documents/{doc_id}/chat")
 async def get_chat(doc_id: str):
-    doc = await db.documents.find_one(
-        {"id": doc_id},
-        {"_id": 0, "chat_history": 1},
-    )
-
+    doc = await db.documents.find_one({"id": doc_id}, {"_id": 0, "chat_history": 1})
     if not doc:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found",
-        )
+        raise HTTPException(status_code=404, detail="Document not found")
 
     history = doc.get("chat_history", [])
     if not isinstance(history, list):
         history = []
 
     messages = []
-
     for message in history:
         if not isinstance(message, dict):
             continue
-
         role = message.get("role")
         content = message.get("content")
-
         if role not in ("user", "assistant") or content is None:
             continue
-
-        messages.append({
-            "role": role,
-            "content": str(content),
-            "created_at": message.get("created_at"),
-        })
+        messages.append({"role": role, "content": str(content), "created_at": message.get("created_at")})
 
     return {"messages": messages}
 
 
 @api_router.post("/documents/{doc_id}/chat")
-async def chat_with_teacher(
-    doc_id: str,
-    payload: ChatMessage,
-):
-    doc = await db.documents.find_one(
-        {"id": doc_id},
-        {"_id": 0},
-    )
-
+async def chat_with_teacher(doc_id: str, payload: ChatMessage):
+    doc = await db.documents.find_one({"id": doc_id}, {"_id": 0})
     if not doc:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found",
-        )
+        raise HTTPException(status_code=404, detail="Document not found")
 
-    material = clean_text(
-        doc.get("raw_text", "")
-    )[:18000]
-
-    history = doc.get(
-        "chat_history",
-        [],
-    )[-4:]
-
+    material = clean_text(doc.get("raw_text", ""))[:18000]
+    history = doc.get("chat_history", [])[-4:]
     history_text = "\n".join(
         f"{m.get('role', 'user')}: {m.get('content', '')}"
-        for m in history
-        if isinstance(m, dict)
+        for m in history if isinstance(m, dict)
     )
 
-    user = (
-        f"RECENT CONVERSATION:\n{history_text}\n\n"
-        f"STUDENT QUESTION:\n{payload.message.strip()}"
-    )
+    user = f"RECENT CONVERSATION:\n{history_text}\n\nSTUDENT QUESTION:\n{payload.message.strip()}"
 
     answer = await _llm_text(
-        TEACHER_PROMPT.format(
-            material=material
-        ),
+        TEACHER_PROMPT.format(material=material),
         user,
         max_tokens=TEACHER_MAX_TOKENS,
         timeout=TEACHER_TIMEOUT,
     )
 
-    now = datetime.now(
-        timezone.utc
-    ).isoformat()
-
+    now = datetime.now(timezone.utc).isoformat()
     updated_history = history + [
-        {
-            "role": "user",
-            "content": payload.message.strip(),
-            "created_at": now,
-        },
-        {
-            "role": "assistant",
-            "content": answer,
-            "created_at": now,
-        },
+        {"role": "user", "content": payload.message.strip(), "created_at": now},
+        {"role": "assistant", "content": answer, "created_at": now},
     ]
 
     await db.documents.update_one(
         {"id": doc_id},
-        {"$set": {
-            "chat_history": updated_history[-10:]
-        }},
+        {"$set": {"chat_history": updated_history[-10:]}},
     )
 
-    return {
-        "answer": answer,
-        "messages": updated_history[-10:],
-    }
+    return {"answer": answer, "messages": updated_history[-10:]}
 
 
 @api_router.delete("/documents/{doc_id}/chat")
 async def clear_chat(doc_id: str):
-    result = await db.documents.update_one(
-        {"id": doc_id},
-        {"$set": {"chat_history": []}},
-    )
-
+    result = await db.documents.update_one({"id": doc_id}, {"$set": {"chat_history": []}})
     if result.matched_count == 0:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found",
-        )
-
-    return {
-        "ok": True,
-        "messages": [],
-    }
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"ok": True, "messages": []}
 
 
 # ============================================================
@@ -774,35 +648,18 @@ async def clear_chat(doc_id: str):
 
 @api_router.get("/documents/{doc_id}/lesson")
 async def get_lesson(doc_id: str):
-    doc = await db.documents.find_one(
-        {"id": doc_id},
-        {"_id": 0},
-    )
-
+    doc = await db.documents.find_one({"id": doc_id}, {"_id": 0})
     if not doc:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found",
-        )
+        raise HTTPException(status_code=404, detail="Document not found")
 
     cached = doc.get("lesson")
-
     if isinstance(cached, dict) and cached.get("slides"):
         return cached
 
-    material = clean_text(
-        doc.get("raw_text", "")
-    )
+    material = clean_text(doc.get("raw_text", ""))
+    lesson = await _generate_lesson_plan(material)
 
-    lesson = await _generate_lesson_plan(
-        material
-    )
-
-    await db.documents.update_one(
-        {"id": doc_id},
-        {"$set": {"lesson": lesson}},
-    )
-
+    await db.documents.update_one({"id": doc_id}, {"$set": {"lesson": lesson}})
     return lesson
 
 
@@ -813,26 +670,12 @@ async def generate_lesson(doc_id: str):
 
 @api_router.post("/documents/{doc_id}/lesson/regenerate")
 async def regenerate_lesson(doc_id: str):
-    doc = await db.documents.find_one(
-        {"id": doc_id},
-        {"_id": 0},
-    )
-
+    doc = await db.documents.find_one({"id": doc_id}, {"_id": 0})
     if not doc:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found",
-        )
+        raise HTTPException(status_code=404, detail="Document not found")
 
-    lesson = await _generate_lesson_plan(
-        clean_text(doc.get("raw_text", ""))
-    )
-
-    await db.documents.update_one(
-        {"id": doc_id},
-        {"$set": {"lesson": lesson}},
-    )
-
+    lesson = await _generate_lesson_plan(clean_text(doc.get("raw_text", "")))
+    await db.documents.update_one({"id": doc_id}, {"$set": {"lesson": lesson}})
     return lesson
 
 
@@ -842,14 +685,8 @@ async def regenerate_lesson(doc_id: str):
 
 @api_router.post("/tts")
 async def tts(payload: TTSRequest):
-    audio = await _edge_tts_base64(
-        payload.text
-    )
-
-    return {
-        "audio_base64": audio,
-        "mime": "audio/mpeg",
-    }
+    audio = await _edge_tts_base64(payload.text)
+    return {"audio_base64": audio, "mime": "audio/mpeg"}
 
 
 # ============================================================
@@ -857,90 +694,46 @@ async def tts(payload: TTSRequest):
 # ============================================================
 
 @api_router.post("/documents/{doc_id}/voice-ask")
-async def voice_ask(
-    doc_id: str,
-    payload: VoiceAskRequest,
-):
-    doc = await db.documents.find_one(
-        {"id": doc_id},
-        {"_id": 0},
-    )
-
+async def voice_ask(doc_id: str, payload: VoiceAskRequest):
+    doc = await db.documents.find_one({"id": doc_id}, {"_id": 0})
     if not doc:
-        raise HTTPException(
-            status_code=404,
-            detail="Document not found",
-        )
+        raise HTTPException(status_code=404, detail="Document not found")
 
     question = payload.text.strip()
-
     if not question:
-        raise HTTPException(
-            status_code=400,
-            detail="Voice question is empty.",
-        )
+        raise HTTPException(status_code=400, detail="Voice question is empty.")
 
-    material = clean_text(
-        doc.get("raw_text", "")
-    )[:18000]
-
-    history = doc.get(
-        "chat_history",
-        [],
-    )[-4:]
-
+    material = clean_text(doc.get("raw_text", ""))[:18000]
+    history = doc.get("chat_history", [])[-4:]
     history_text = "\n".join(
         f"{m.get('role', 'user')}: {m.get('content', '')}"
-        for m in history
-        if isinstance(m, dict)
+        for m in history if isinstance(m, dict)
     )
 
     answer = await _llm_text(
-        TEACHER_PROMPT.format(
-            material=material
-        ),
-        (
-            f"RECENT CONVERSATION:\n{history_text}\n\n"
-            f"STUDENT SPOKEN QUESTION:\n{question}"
-        ),
+        TEACHER_PROMPT.format(material=material),
+        f"RECENT CONVERSATION:\n{history_text}\n\nSTUDENT SPOKEN QUESTION:\n{question}",
         max_tokens=TEACHER_MAX_TOKENS,
         timeout=TEACHER_TIMEOUT,
     )
 
-    audio = await _edge_tts_base64(
-        answer
-    )
-
-    now = datetime.now(
-        timezone.utc
-    ).isoformat()
+    audio = await _edge_tts_base64(answer)
+    now = datetime.now(timezone.utc).isoformat()
 
     await db.documents.update_one(
         {"id": doc_id},
         {"$push": {
             "chat_history": {
                 "$each": [
-                    {
-                        "role": "user",
-                        "content": question,
-                        "created_at": now,
-                    },
-                    {
-                        "role": "assistant",
-                        "content": answer,
-                        "created_at": now,
-                    },
+                    {"role": "user", "content": question, "created_at": now},
+                    {"role": "assistant", "content": answer, "created_at": now},
                 ],
                 "$slice": -10,
             }
         }},
     )
 
-    return {
-        "answer": answer,
-        "audio_base64": audio,
-        "mime": "audio/mpeg",
-    }
+    return {"answer": answer, "audio_base64": audio, "mime": "audio/mpeg"}
 
 
 # ============================================================
@@ -954,10 +747,7 @@ app.include_router(api_router)
 # CORS
 # ============================================================
 
-origins = os.environ.get(
-    "CORS_ORIGINS",
-    "*",
-)
+origins = os.environ.get("CORS_ORIGINS", "*")
 
 app.add_middleware(
     CORSMiddleware,
