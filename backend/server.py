@@ -13,7 +13,6 @@ import hashlib
 import os
 import ssl
 
-# TLS compatibility must be installed before importing the legacy backend.
 _original_create_default_context = ssl.create_default_context
 
 
@@ -47,16 +46,15 @@ class _StudyPilotAsyncClient(_OriginalAsyncClient):
 
 httpx.AsyncClient = _StudyPilotAsyncClient
 
-# Load the existing application implementation.
 import server_legacy as _legacy
 
 app = _legacy.app
 
-# ------------------------------------------------------------
-# Fast lesson generation
-# ------------------------------------------------------------
 FAST_LESSON_MODEL = os.environ.get("ANTHROPIC_LESSON_MODEL", "claude-haiku-4-5")
 LESSON_INPUT_CHARS = int(os.environ.get("LESSON_INPUT_CHARS", "32000"))
+# Use the same fast model for the study-set pipeline. This makes quiz,
+# flashcards and lesson generation consistently low-latency for the demo.
+_legacy.ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", FAST_LESSON_MODEL)
 _lesson_tasks: dict[str, asyncio.Task] = {}
 
 FAST_LESSON_PROMPT = """You are Professor StudyPilot creating a fast university video lecture.
@@ -141,89 +139,48 @@ async def _fast_generate_lesson_plan(material: str) -> dict:
             continue
         pop = item.get("pop_quiz")
         pop = _legacy._shuffle_mcq_options(pop) if pop and _legacy._valid_mcq(pop) else None
-        slides.append(
-            {
-                "title": title[:80],
-                "bullets": bullets[:4],
-                "narration": narration[:1800],
-                "pop_quiz": pop,
-            }
-        )
+        slides.append({"title": title[:80], "bullets": bullets[:4], "narration": narration[:1800], "pop_quiz": pop})
 
     if not slides:
         raise RuntimeError("AI could not generate a usable video lesson.")
 
-    homework = [
-        {
-            "question": str(x.get("question", "")).strip()[:400],
-            "guidance": str(x.get("guidance", "")).strip()[:400],
-        }
-        for x in data.get("homework", [])
-        if isinstance(x, dict) and x.get("question")
-    ]
-    return {
-        "title": str(data.get("title", "Lesson")).strip()[:80] or "Lesson",
-        "slides": slides[:14],
-        "homework": homework[:3],
-    }
+    homework = [{"question": str(x.get("question", "")).strip()[:400], "guidance": str(x.get("guidance", "")).strip()[:400]} for x in data.get("homework", []) if isinstance(x, dict) and x.get("question")]
+    return {"title": str(data.get("title", "Lesson")).strip()[:80] or "Lesson", "slides": slides[:14], "homework": homework[:3]}
 
 
 async def _fast_process_document(doc_id: str):
     """Generate the video lesson and study set concurrently."""
     try:
-        await _legacy.db.documents.update_one(
-            {"id": doc_id}, {"$set": {"status": "processing", "error": None}}
-        )
+        await _legacy.db.documents.update_one({"id": doc_id}, {"$set": {"status": "processing", "error": None}})
         doc = await _legacy.db.documents.find_one({"id": doc_id}, {"_id": 0})
         if not doc:
             return
-
         cleaned = _legacy.clean_text(doc.get("raw_text", ""))
         if len(cleaned) < 200:
-            await _legacy.db.documents.update_one(
-                {"id": doc_id},
-                {"$set": {"status": "error", "error": "Not enough readable text extracted from the PDF."}},
-            )
+            await _legacy.db.documents.update_one({"id": doc_id}, {"$set": {"status": "error", "error": "Not enough readable text extracted from the PDF."}})
             return
 
-        # Critical latency win: video lesson and quiz/flashcards start together.
         lesson_task = asyncio.create_task(_fast_generate_lesson_plan(cleaned))
         study_task = asyncio.create_task(_legacy.generate_study_content(cleaned, doc_id))
 
         lesson = await lesson_task
-        await _legacy.db.documents.update_one(
-            {"id": doc_id}, {"$set": {"lesson": lesson}}
-        )
-
-        # Start TTS immediately. VideoTeacher will normally receive cached audio.
+        await _legacy.db.documents.update_one({"id": doc_id}, {"$set": {"lesson": lesson}})
         asyncio.create_task(_legacy._warm_lesson_audio(lesson))
 
-        # Quiz/flashcards finish independently without delaying lesson creation.
         result = await study_task
         if not result["quiz"] and not result["flashcards"]:
-            await _legacy.db.documents.update_one(
-                {"id": doc_id},
-                {"$set": {"status": "error", "error": "AI could not generate meaningful questions from this material."}},
-            )
+            await _legacy.db.documents.update_one({"id": doc_id}, {"$set": {"status": "error", "error": "AI could not generate meaningful questions from this material."}})
             return
-
-        await _legacy.db.documents.update_one(
-            {"id": doc_id}, {"$set": {"status": "ready", **result}}
-        )
+        await _legacy.db.documents.update_one({"id": doc_id}, {"$set": {"status": "ready", **result}})
         _legacy.logger.info("Document ready: %s", doc_id)
     except Exception as exc:
         _legacy.logger.exception("fast process_document failed")
-        await _legacy.db.documents.update_one(
-            {"id": doc_id}, {"$set": {"status": "error", "error": str(exc)[:400]}}
-        )
+        await _legacy.db.documents.update_one({"id": doc_id}, {"$set": {"status": "error", "error": str(exc)[:400]}})
 
 
-# The legacy upload route resolves process_document at runtime, so replacing
-# this symbol changes the pipeline without changing the public API.
 _legacy.process_document = _fast_process_document
 _legacy._generate_lesson_plan = _fast_generate_lesson_plan
 
-# Preserve direct access to legacy public names for uvicorn/local tooling.
 for _name in dir(_legacy):
     if not _name.startswith("_"):
         globals()[_name] = getattr(_legacy, _name)
